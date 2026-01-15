@@ -1,7 +1,7 @@
 name: Build OnePlus 11 Kernel (方案C - 官方Config+KSU)
 
-# 这个方案从官方 crDroid boot.img 提取 .config，只添加 KSU
-# 理论上最接近官方内核，成功率最高
+# 这个方案从官��?crDroid boot.img 提取 .config，只添加 KSU
+# 理论上最接近官方内核，成功率最��?
 
 on:
   workflow_dispatch:
@@ -29,11 +29,11 @@ jobs:
 
     - name: Download Official crDroid Boot Image
       run: |
-        # 下载 crDroid 官方 ROM 并提取 boot.img 的 .config
+        # 下载 crDroid 官方 ROM 并提��?boot.img ��?.config
         echo ">>> Downloading crDroid ROM..."
         wget -q "https://sourceforge.net/projects/crdroid/files/salami/10.x/crDroidAndroid-14.0-20250228-salami-v10.13.zip/download" -O crdroid.zip || {
           echo ">>> Direct download failed, trying mirror..."
-          # 如果下载失败，使用 gki_defconfig + vendor configs 作为 fallback
+          # 如果下载失败，使��?gki_defconfig + vendor configs 作为 fallback
           echo "FALLBACK=true" >> $GITHUB_ENV
         }
         
@@ -156,7 +156,7 @@ jobs:
         
         if [ -f "../official.config" ] && [ "$FALLBACK" != "true" ]; then
             echo ">>> Using extracted official config!"
-            cp ../official.config out/.config
+            mkdir -p out; cp ../official.config out/.config
         else
             echo ">>> Fallback: Using standard config merge..."
             make O=out gki_defconfig
@@ -171,7 +171,7 @@ jobs:
             [ -f "$SALAMI_CFG" ] && ./scripts/kconfig/merge_config.sh -m -O out out/.config "$SALAMI_CFG"
         fi
         
-        # 只添加 KSU 和 SuSFS，不改其他任何东西
+        # 只添��?KSU ��?SuSFS，不改其他任何东��?
         echo ">>> Adding KSU and SuSFS configs..."
         ./scripts/config --file out/.config --enable KSU
         ./scripts/config --file out/.config --enable KSU_SUSFS
@@ -192,7 +192,7 @@ jobs:
         # 确保 OverlayFS 启用
         ./scripts/config --file out/.config --enable OVERLAY_FS
         
-        make O=out olddefconfig
+        ./scripts/config --file out/.config --disable LOCALVERSION_AUTO; ./scripts/config --file out/.config --set-str LOCALVERSION "-gc1e512cfc3eb"; make O=out olddefconfig
         
         echo ">>> Verifying config..."
         grep -E "CONFIG_KSU=|CONFIG_SCSI_UFS_QCOM=|CONFIG_LTO" out/.config | head -10
@@ -255,3 +255,4 @@ jobs:
         name: OnePlus11-Kernel-C-OfficialConfig
         path: OnePlus11-Kernel-C-OfficialConfig.zip
         if-no-files-found: warn
+
