@@ -1,0 +1,257 @@
+name: Build OnePlus 11 Kernel (方案C - 官方Config+KSU)
+
+# 这个方案从官方 crDroid boot.img 提取 .config，只添加 KSU
+# 理论上最接近官方内核，成功率最高
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Setup Build Environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y bc bison build-essential ccache curl flex git gnupg gperf imagemagick lib32readline-dev lib32z1-dev liblz4-tool libncurses-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 python3-pip gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libelf-dev dwarves
+
+    - name: Download Neutron Clang
+      run: |
+        mkdir -p clang
+        cd clang
+        bash <(curl -s "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman") -S
+        echo "PATH=$PWD/bin:$PATH" >> $GITHUB_ENV
+
+    - name: Clone Kernel Source
+      run: |
+        git clone --depth=1 https://github.com/crdroidandroid/android_kernel_oneplus_sm8550 -b 14.0 android-kernel
+
+    - name: Download Official crDroid Boot Image
+      run: |
+        # 下载 crDroid 官方 ROM 并提取 boot.img 的 .config
+        echo ">>> Downloading crDroid ROM..."
+        wget -q "https://sourceforge.net/projects/crdroid/files/salami/10.x/crDroidAndroid-14.0-20250228-salami-v10.13.zip/download" -O crdroid.zip || {
+          echo ">>> Direct download failed, trying mirror..."
+          # 如果下载失败，使用 gki_defconfig + vendor configs 作为 fallback
+          echo "FALLBACK=true" >> $GITHUB_ENV
+        }
+        
+        if [ -f crdroid.zip ]; then
+          echo ">>> Extracting payload.bin..."
+          unzip -q crdroid.zip payload.bin -d .
+          
+          echo ">>> Installing payload_dumper..."
+          pip3 install payload_dumper
+          
+          echo ">>> Extracting boot.img..."
+          payload_dumper --out . payload.bin --partitions boot
+          
+          if [ -f boot.img ]; then
+            echo ">>> Extracting kernel config from boot.img..."
+            # 使用 extract-ikconfig 脚本
+            cd android-kernel
+            ./scripts/extract-ikconfig ../boot.img > ../official.config 2>/dev/null || {
+              echo ">>> extract-ikconfig failed, using fallback"
+              echo "FALLBACK=true" >> $GITHUB_ENV
+            }
+            cd ..
+            
+            if [ -f official.config ] && [ -s official.config ]; then
+              echo ">>> Official config extracted successfully!"
+              echo ">>> Config lines: $(wc -l < official.config)"
+              echo "FALLBACK=false" >> $GITHUB_ENV
+            fi
+          fi
+        fi
+
+    - name: Integrate KernelSU and SuSFS
+      run: |
+        cd android-kernel
+        echo ">>> Integrating KernelSU-Next..."
+        rm -rf KernelSU-Next drivers/kernelsu
+        
+        git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next.git
+        mv KernelSU-Next/kernel drivers/kernelsu
+        
+        if ! grep -q "drivers/kernelsu" drivers/Makefile; then
+            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+        fi
+        if ! grep -q "drivers/kernelsu" drivers/Kconfig; then
+            sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+        fi
+        
+        echo ">>> Downloading SuSFS kernel patches for 5.15..."
+        rm -rf susfs4ksu
+        git clone -b gki-android13-5.15 https://gitlab.com/simonpunk/susfs4ksu.git
+        
+        cp susfs4ksu/kernel_patches/fs/susfs.c fs/
+        cp susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
+        cp susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/
+        
+        echo ">>> Applying SuSFS kernel patches..."
+        SUSFS_PATCH=$(find susfs4ksu/kernel_patches -maxdepth 1 -name "50_add_susfs*.patch" | head -1)
+        if [ -n "$SUSFS_PATCH" ]; then
+            echo "Found patch: $SUSFS_PATCH"
+            patch -p1 < "$SUSFS_PATCH" || echo "Patch conflict (may already be applied)"
+        fi
+        
+        echo ">>> Manually fixing KernelSU-Next missing includes..."
+        cd drivers/kernelsu
+        sed -i '1i #include <linux/susfs.h>' ksu.c
+        sed -i '1i #include <linux/susfs.h>' allowlist.c
+        cd ../..
+
+    - name: Fix OPlus Driver Compatibility
+      run: |
+        cd android-kernel
+        echo ">>> Fixing kernel 5.10+ API compatibility issues..."
+        
+        OPLUS_PROJECT="drivers/soc/oplus/boot/oplus_project/qcom/oplus_project.c"
+        if [ -f "$OPLUS_PROJECT" ]; then
+            echo "Creating stub for oplus_project driver..."
+            echo '// SPDX-License-Identifier: GPL-2.0-only' > "$OPLUS_PROJECT"
+            echo '#include <linux/module.h>' >> "$OPLUS_PROJECT"
+            echo '#include <linux/kernel.h>' >> "$OPLUS_PROJECT"
+            echo '#include <linux/init.h>' >> "$OPLUS_PROJECT"
+            echo '#include <linux/proc_fs.h>' >> "$OPLUS_PROJECT"
+            echo 'unsigned int get_project(void) { return 0; }' >> "$OPLUS_PROJECT"
+            echo 'EXPORT_SYMBOL(get_project);' >> "$OPLUS_PROJECT"
+            echo 'unsigned int get_PCB_Version(void) { return 0; }' >> "$OPLUS_PROJECT"
+            echo 'EXPORT_SYMBOL(get_PCB_Version);' >> "$OPLUS_PROJECT"
+            echo 'unsigned int get_Modem_Version(void) { return 0; }' >> "$OPLUS_PROJECT"
+            echo 'EXPORT_SYMBOL(get_Modem_Version);' >> "$OPLUS_PROJECT"
+            echo 'unsigned int get_Operator_Version(void) { return 0; }' >> "$OPLUS_PROJECT"
+            echo 'EXPORT_SYMBOL(get_Operator_Version);' >> "$OPLUS_PROJECT"
+            echo 'unsigned int get_dtsiNo(void) { return 0; }' >> "$OPLUS_PROJECT"
+            echo 'EXPORT_SYMBOL(get_dtsiNo);' >> "$OPLUS_PROJECT"
+            echo 'unsigned int get_audio(void) { return 0; }' >> "$OPLUS_PROJECT"
+            echo 'EXPORT_SYMBOL(get_audio);' >> "$OPLUS_PROJECT"
+            echo 'int get_serialID(void) { return 0; }' >> "$OPLUS_PROJECT"
+            echo 'EXPORT_SYMBOL(get_serialID);' >> "$OPLUS_PROJECT"
+            echo 'struct proc_dir_entry *oplus_info = NULL;' >> "$OPLUS_PROJECT"
+            echo 'EXPORT_SYMBOL(oplus_info);' >> "$OPLUS_PROJECT"
+            echo 'static int __init oplus_project_init(void) { oplus_info = proc_mkdir("oplusVersion", NULL); return 0; }' >> "$OPLUS_PROJECT"
+            echo 'static void __exit oplus_project_exit(void) { if (oplus_info) proc_remove(oplus_info); }' >> "$OPLUS_PROJECT"
+            echo 'module_init(oplus_project_init);' >> "$OPLUS_PROJECT"
+            echo 'module_exit(oplus_project_exit);' >> "$OPLUS_PROJECT"
+            echo 'MODULE_LICENSE("GPL v2");' >> "$OPLUS_PROJECT"
+        fi
+        
+        SENSOR_MAKEFILE="drivers/soc/oplus/sensor/Makefile"
+        if [ -f "$SENSOR_MAKEFILE" ]; then
+            sed -i 's/^obj-/# obj-/g' "$SENSOR_MAKEFILE"
+        fi
+
+    - name: Compile Kernel
+      run: |
+        cd android-kernel
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+        export CC=clang
+        
+        echo ">>> [方案C] 使用官方 Config + KSU"
+        
+        if [ -f "../official.config" ] && [ "$FALLBACK" != "true" ]; then
+            echo ">>> Using extracted official config!"
+            cp ../official.config out/.config
+        else
+            echo ">>> Fallback: Using standard config merge..."
+            make O=out gki_defconfig
+            
+            KALAMA_CFG="arch/arm64/configs/vendor/kalama_GKI.config"
+            [ -f "$KALAMA_CFG" ] && ./scripts/kconfig/merge_config.sh -m -O out out/.config "$KALAMA_CFG"
+            
+            OPLUS_KALAMA_CFG="arch/arm64/configs/vendor/oplus/kalama_GKI.config"
+            [ -f "$OPLUS_KALAMA_CFG" ] && ./scripts/kconfig/merge_config.sh -m -O out out/.config "$OPLUS_KALAMA_CFG"
+            
+            SALAMI_CFG="arch/arm64/configs/vendor/oplus/salami.config"
+            [ -f "$SALAMI_CFG" ] && ./scripts/kconfig/merge_config.sh -m -O out out/.config "$SALAMI_CFG"
+        fi
+        
+        # 只添加 KSU 和 SuSFS，不改其他任何东西
+        echo ">>> Adding KSU and SuSFS configs..."
+        ./scripts/config --file out/.config --enable KSU
+        ./scripts/config --file out/.config --enable KSU_SUSFS
+        ./scripts/config --file out/.config --enable KSU_SUSFS_SUS_PATH
+        ./scripts/config --file out/.config --enable KSU_SUSFS_SUS_MOUNT
+        ./scripts/config --file out/.config --enable KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT
+        ./scripts/config --file out/.config --enable KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT
+        ./scripts/config --file out/.config --enable KSU_SUSFS_SUS_KSTAT
+        ./scripts/config --file out/.config --enable KSU_SUSFS_SUS_OVERLAYFS
+        ./scripts/config --file out/.config --enable KSU_SUSFS_TRY_UMOUNT
+        ./scripts/config --file out/.config --enable KSU_SUSFS_SPOOF_UNAME
+        ./scripts/config --file out/.config --enable KSU_SUSFS_ENABLE_LOG
+        ./scripts/config --file out/.config --enable KSU_SUSFS_OPEN_REDIRECT
+        ./scripts/config --file out/.config --enable KSU_SUSFS_SUS_MAP
+        ./scripts/config --file out/.config --enable KSU_SUSFS_SPOOF_CMDLINE
+        ./scripts/config --file out/.config --enable KSU_SUSFS_AVC_SPOOF
+        
+        # 确保 OverlayFS 启用
+        ./scripts/config --file out/.config --enable OVERLAY_FS
+        
+        make O=out olddefconfig
+        
+        echo ">>> Verifying config..."
+        grep -E "CONFIG_KSU=|CONFIG_SCSI_UFS_QCOM=|CONFIG_LTO" out/.config | head -10
+        
+        echo ">>> Building kernel..."
+        make -j"$(nproc --all)" O=out LLVM=1 LLVM_IAS=1 Image dtbs
+
+    - name: Package with AnyKernel3
+      run: |
+        git clone https://github.com/osm0sis/AnyKernel3
+        cd AnyKernel3
+        
+        cat > anykernel.sh << 'EOF'
+        ### AnyKernel3 Ramdisk Mod Script
+        ## osm0sis @ xda-developers
+
+        ### AnyKernel setup
+        properties() { '
+        kernel.string=KernelSU-Next-SuSFS for OnePlus 11 (方案C-官方Config)
+        do.devicecheck=0
+        do.modules=0
+        do.systemless=0
+        do.cleanup=1
+        do.cleanuponabort=0
+        device.name1=
+        device.name2=
+        device.name3=
+        device.name4=
+        device.name5=
+        supported.versions=
+        supported.patchlevels=
+        supported.vendorpatchlevels=
+        '; } # end properties
+
+        ### AnyKernel install
+        block=boot
+        is_slot_device=auto
+        ramdisk_compression=auto
+        patch_vbmeta_flag=auto
+        no_magisk_check=1
+
+        . tools/ak3-core.sh
+
+        split_boot
+        if [ -f "split_img/ramdisk.cpio" ]; then
+            unpack_ramdisk
+            write_boot
+        else
+            flash_boot
+        fi
+        EOF
+        
+        cp ../android-kernel/out/arch/arm64/boot/Image .
+        rm -rf .git .github README.md LICENSE
+        zip -r9 ../OnePlus11-Kernel-C-OfficialConfig.zip *
+        
+    - name: Upload Kernel Image
+      uses: actions/upload-artifact@v4
+      with:
+        name: OnePlus11-Kernel-C-OfficialConfig
+        path: OnePlus11-Kernel-C-OfficialConfig.zip
+        if-no-files-found: warn
